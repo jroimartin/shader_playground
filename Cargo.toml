@@ -1,0 +1,11 @@
+[package]
+name = "shader_playground"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+env_logger = "0.11.3"
+pollster = "0.3.0"
+wgpu = "0.19.3"
+winit = "0.29.15"
