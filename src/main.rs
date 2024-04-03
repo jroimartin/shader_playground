@@ -3,7 +3,7 @@ use std::{env, path::Path, process};
 use shader_playground::ShaderPlayground;
 use winit::{
     event::{Event, KeyEvent, WindowEvent},
-    event_loop::EventLoop,
+    event_loop::{ControlFlow, EventLoop},
     keyboard::Key,
     window::WindowBuilder,
 };
@@ -17,18 +17,15 @@ async fn run<P: AsRef<Path>>(shader_path: P) {
         .await
         .expect("could not create shader playground");
 
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    playground.update_render_pipeline();
     event_loop
-        .run(|event, elwt| {
-            let Event::WindowEvent {
+        .run(|event, elwt| match event {
+            Event::WindowEvent {
                 window_id: _,
                 event,
-            } = event
-            else {
-                return;
-            };
-
-            match event {
-                WindowEvent::Resized(new_size) => playground.resize(new_size),
+            } => match event {
                 WindowEvent::KeyboardInput {
                     event:
                         KeyEvent {
@@ -36,13 +33,23 @@ async fn run<P: AsRef<Path>>(shader_path: P) {
                             ..
                         },
                     ..
-                } if s == "r" => window.request_redraw(),
+                } if s == "r" => {
+                    playground.update_render_pipeline();
+                    window.request_redraw();
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    playground.set_mouse_coords(position.x as f32, position.y as f32);
+                    window.request_redraw();
+                }
+                WindowEvent::Resized(new_size) => playground.resize(new_size),
                 WindowEvent::RedrawRequested => {
                     playground.render().expect("could not render frame")
                 }
                 WindowEvent::CloseRequested => elwt.exit(),
                 _ => {}
-            }
+            },
+            Event::AboutToWait => window.request_redraw(),
+            _ => {}
         })
         .unwrap();
 }

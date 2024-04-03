@@ -2,7 +2,9 @@ use std::{
     borrow::Cow,
     fmt, fs, io, mem,
     path::{Path, PathBuf},
+    slice,
     sync::{Arc, Mutex},
+    time,
 };
 
 use wgpu::{include_wgsl, util::DeviceExt};
@@ -13,6 +15,7 @@ pub enum Error {
     RequestAdapter,
     GetSurfaceConfig,
     GetTextureFormat,
+    UninitRenderPipeline,
     Wgpu(wgpu::Error),
     RequestDevice(wgpu::RequestDeviceError),
     Surface(wgpu::SurfaceError),
@@ -25,6 +28,7 @@ impl fmt::Display for Error {
             Error::RequestAdapter => write!(f, "failed to request adapter"),
             Error::GetSurfaceConfig => write!(f, "failed to get surface configuration"),
             Error::GetTextureFormat => write!(f, "failed to get texture format"),
+            Error::UninitRenderPipeline => write!(f, "uninitialized render pipeline"),
             Error::Wgpu(err) => write!(f, "wgpu error: {err}"),
             Error::RequestDevice(err) => write!(f, "request device error: {err}"),
             Error::Surface(err) => write!(f, "surface error: {err}"),
@@ -51,31 +55,41 @@ impl From<io::Error> for Error {
     }
 }
 
+#[allow(dead_code)]
+#[repr(align(16))]
 struct Vertex {
     coords: [f32; 3],
     color: [f32; 3],
 }
 
 impl Vertex {
-    const ATTRS: [wgpu::VertexAttribute; 2] =
+    const VERTEX_ATTR_ARRAY: [wgpu::VertexAttribute; 2] =
         wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+
+    fn as_bytes(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self as *const Self as *const u8, mem::size_of::<Self>()) }
+    }
 
     fn vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: 2 * mem::size_of::<[f32; 3]>() as u64,
+            array_stride: mem::size_of::<Self>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRS,
+            attributes: &Self::VERTEX_ATTR_ARRAY,
         }
     }
 }
 
-impl Vertex {
-    fn to_bytes(&self) -> Vec<u8> {
-        self.coords
-            .iter()
-            .chain(self.color.iter())
-            .flat_map(|c| c.to_ne_bytes())
-            .collect()
+#[derive(Default)]
+#[repr(align(8))]
+struct Uniforms {
+    mouse_coords: [f32; 2],
+    surface_size: [f32; 2],
+    time: f32,
+}
+
+impl Uniforms {
+    fn as_bytes(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self as *const Self as *const u8, mem::size_of::<Self>()) }
     }
 }
 
@@ -83,11 +97,17 @@ pub struct ShaderPlayground<'a> {
     shader_path: PathBuf,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    wgpu_error: Arc<Mutex<Option<wgpu::Error>>>,
     surface: wgpu::Surface<'a>,
     surface_config: wgpu::SurfaceConfiguration,
     texture_format: wgpu::TextureFormat,
     vertex_buffer: wgpu::Buffer,
-    wgpu_error: Arc<Mutex<Option<wgpu::Error>>>,
+    uniforms: Uniforms,
+    uniforms_buffer: wgpu::Buffer,
+    uniforms_bind_group: wgpu::BindGroup,
+    pipeline_layout: wgpu::PipelineLayout,
+    render_pipeline: Option<wgpu::RenderPipeline>,
+    start_time: time::Instant,
 }
 
 impl<'a> ShaderPlayground<'a> {
@@ -163,66 +183,112 @@ impl<'a> ShaderPlayground<'a> {
             .first()
             .ok_or(Error::GetTextureFormat)?;
 
-        let vertex_buffer_contents: Vec<u8> =
-            Self::VERTICES.iter().flat_map(|v| v.to_bytes()).collect();
-
+        let vertex_buffer_contents: Vec<u8> = Self::VERTICES
+            .iter()
+            .flat_map(|v| v.as_bytes())
+            .copied()
+            .collect();
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: &vertex_buffer_contents,
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        let uniforms_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniforms_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: None,
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let uniforms_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &uniforms_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms_buffer.as_entire_binding(),
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&uniforms_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
         Ok(ShaderPlayground {
             shader_path: shader_path.as_ref().to_owned(),
             device,
             queue,
+            wgpu_error,
             surface,
             surface_config,
             texture_format,
             vertex_buffer,
-            wgpu_error,
+            uniforms: Uniforms::default(),
+            uniforms_buffer,
+            uniforms_bind_group,
+            pipeline_layout,
+            render_pipeline: None,
+            start_time: time::Instant::now(),
         })
+    }
+
+    pub fn set_mouse_coords(&mut self, x: f32, y: f32) {
+        self.uniforms.mouse_coords = [x, y];
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         self.surface_config.width = new_size.width.max(1);
         self.surface_config.height = new_size.height.max(1);
         self.surface.configure(&self.device, &self.surface_config);
+        self.uniforms.surface_size = [
+            self.surface_config.width as f32,
+            self.surface_config.height as f32,
+        ];
     }
 
-    pub fn render(&self) -> Result<(), Error> {
-        self.render_user_shader().or_else(|err| {
-            eprintln!("failed to render user shader: {err}");
-            self.render_default_shader()
-        })
+    pub fn update_render_pipeline(&mut self) {
+        let render_pipeline = match self.create_user_render_pipeline() {
+            Ok(render_pipeline) => render_pipeline,
+            Err(err) => {
+                eprintln!("failed to render user shader: {err}");
+                self.create_default_render_pipeline()
+            }
+        };
+        self.render_pipeline = Some(render_pipeline);
     }
 
-    fn render_user_shader(&self) -> Result<(), Error> {
-        self.render_with_shader_module(self.shader_module()?)
-    }
-
-    fn render_default_shader(&self) -> Result<(), Error> {
+    fn create_default_render_pipeline(&self) -> wgpu::RenderPipeline {
         let shader_module = self
             .device
             .create_shader_module(include_wgsl!("default.wgsl"));
-        self.render_with_shader_module(shader_module)
+        self.create_render_pipeline(shader_module)
     }
 
-    fn render_with_shader_module(&self, shader_module: wgpu::ShaderModule) -> Result<(), Error> {
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: None,
-                // TODO(rm): add mouse coordinates uniform.
-                bind_group_layouts: &[],
-                push_constant_ranges: &[],
-            });
+    fn create_user_render_pipeline(&self) -> Result<wgpu::RenderPipeline, Error> {
+        let shader_module = self.read_user_shader()?;
+        Ok(self.create_render_pipeline(shader_module))
+    }
 
-        let render_pipeline = self
-            .device
+    fn create_render_pipeline(&self, shader_module: wgpu::ShaderModule) -> wgpu::RenderPipeline {
+        self.device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: None,
-                layout: Some(&pipeline_layout),
+                layout: Some(&self.pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader_module,
                     entry_point: "vs_main",
@@ -237,7 +303,19 @@ impl<'a> ShaderPlayground<'a> {
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
-            });
+            })
+    }
+
+    pub fn render(&mut self) -> Result<(), Error> {
+        let render_pipeline = self
+            .render_pipeline
+            .as_ref()
+            .ok_or(Error::UninitRenderPipeline)?;
+
+        self.uniforms.time = self.start_time.elapsed().as_secs_f32();
+
+        self.queue
+            .write_buffer(&self.uniforms_buffer, 0, self.uniforms.as_bytes());
 
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -263,8 +341,9 @@ impl<'a> ShaderPlayground<'a> {
                 occlusion_query_set: None,
             });
 
-            rpass.set_pipeline(&render_pipeline);
+            rpass.set_pipeline(render_pipeline);
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            rpass.set_bind_group(0, &self.uniforms_bind_group, &[]);
             rpass.draw(0..Self::VERTICES.len() as u32, 0..1);
         }
         self.queue.submit(Some(encoder.finish()));
@@ -272,7 +351,7 @@ impl<'a> ShaderPlayground<'a> {
         Ok(())
     }
 
-    fn shader_module(&self) -> Result<wgpu::ShaderModule, Error> {
+    fn read_user_shader(&self) -> Result<wgpu::ShaderModule, Error> {
         let shader_code = fs::read_to_string(&self.shader_path)?;
         let shader_module = self
             .device
