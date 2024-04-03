@@ -155,11 +155,12 @@ impl<'a> ShaderPlayground<'a> {
             .ok_or(Error::GetSurfaceConfig)?;
         surface.configure(&device, &surface_config);
 
-        // The first format in the `formats` vector is preferred.
+        // The first texture format in the `formats` vector is
+        // preferred.
         let texture_format = *surface
             .get_capabilities(&adapter)
             .formats
-            .get(0)
+            .first()
             .ok_or(Error::GetTextureFormat)?;
 
         let vertex_buffer_contents: Vec<u8> =
