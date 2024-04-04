@@ -1,3 +1,20 @@
+// WGSL's memory layout:
+//
+// Type                    Alignment in Bytes  Size in Bytes
+// scalar (i32, u32, f32)                   4              4
+// vec2<T>                                  8              8
+// vec3<T>                                 16             12
+// vec4<T>                                 16             16
+//
+// In the case of structs:
+//
+// AlignOf(S) = max(AlignOfMember(S, M1), ... , AlignOfMember(S, Mn))
+//
+// where `S` is the struct in question and `M` is a member of the
+// struct.
+//
+// Reference: https://www.w3.org/TR/WGSL/#memory-layouts
+
 use std::{
     borrow::Cow,
     fmt, fs, io, mem,
