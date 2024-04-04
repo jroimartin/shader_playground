@@ -18,8 +18,6 @@ async fn run<P: AsRef<Path>>(shader_path: P) {
         .expect("could not create shader playground");
 
     event_loop.set_control_flow(ControlFlow::Poll);
-
-    playground.update_render_pipeline();
     event_loop
         .run(|event, elwt| match event {
             Event::WindowEvent {
@@ -33,10 +31,9 @@ async fn run<P: AsRef<Path>>(shader_path: P) {
                             ..
                         },
                     ..
-                } if s == "r" => {
-                    playground.update_render_pipeline();
-                    window.request_redraw();
-                }
+                } if s == "r" => playground
+                    .update_render_pipeline()
+                    .expect("could not update render pipeline"),
                 WindowEvent::CursorMoved { position, .. } => {
                     playground.set_mouse_coords(position.x as f32, position.y as f32);
                     window.request_redraw();

@@ -34,6 +34,7 @@ pub enum Error {
     GetTextureFormat,
     UninitRenderPipeline,
     Wgpu(wgpu::Error),
+    CreateSurface(wgpu::CreateSurfaceError),
     RequestDevice(wgpu::RequestDeviceError),
     Surface(wgpu::SurfaceError),
     Io(io::Error),
@@ -42,33 +43,46 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::RequestAdapter => write!(f, "failed to request adapter"),
-            Error::GetSurfaceConfig => write!(f, "failed to get surface configuration"),
-            Error::GetTextureFormat => write!(f, "failed to get texture format"),
-            Error::UninitRenderPipeline => write!(f, "uninitialized render pipeline"),
-            Error::Wgpu(err) => write!(f, "wgpu error: {err}"),
-            Error::RequestDevice(err) => write!(f, "request device error: {err}"),
-            Error::Surface(err) => write!(f, "surface error: {err}"),
-            Error::Io(err) => write!(f, "i/o error: {err}"),
+            Self::RequestAdapter => write!(f, "failed to request adapter"),
+            Self::GetSurfaceConfig => write!(f, "failed to get surface configuration"),
+            Self::GetTextureFormat => write!(f, "failed to get texture format"),
+            Self::UninitRenderPipeline => write!(f, "uninitialized render pipeline"),
+            Self::Wgpu(err) => write!(f, "wgpu error: {err}"),
+            Self::CreateSurface(err) => write!(f, "create surface error: {err}"),
+            Self::RequestDevice(err) => write!(f, "request device error: {err}"),
+            Self::Surface(err) => write!(f, "surface error: {err}"),
+            Self::Io(err) => write!(f, "i/o error: {err}"),
         }
+    }
+}
+
+impl From<wgpu::Error> for Error {
+    fn from(err: wgpu::Error) -> Self {
+        Self::Wgpu(err)
+    }
+}
+
+impl From<wgpu::CreateSurfaceError> for Error {
+    fn from(err: wgpu::CreateSurfaceError) -> Self {
+        Self::CreateSurface(err)
     }
 }
 
 impl From<wgpu::RequestDeviceError> for Error {
     fn from(err: wgpu::RequestDeviceError) -> Self {
-        Error::RequestDevice(err)
+        Self::RequestDevice(err)
     }
 }
 
 impl From<wgpu::SurfaceError> for Error {
     fn from(err: wgpu::SurfaceError) -> Self {
-        Error::Surface(err)
+        Self::Surface(err)
     }
 }
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
-        Error::Io(err)
+        Self::Io(err)
     }
 }
 
@@ -158,7 +172,7 @@ impl<'a> ShaderPlayground<'a> {
     pub async fn new<P: AsRef<Path>>(window: &'a Window, shader_path: P) -> Result<Self, Error> {
         let instance = wgpu::Instance::default();
 
-        let surface = instance.create_surface(window).unwrap();
+        let surface = instance.create_surface(window)?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
@@ -183,7 +197,11 @@ impl<'a> ShaderPlayground<'a> {
         let wgpu_error = Arc::new(Mutex::new(None));
         let handler_wgpu_error = Arc::clone(&wgpu_error);
         device.on_uncaptured_error(Box::new(move |err| {
-            *handler_wgpu_error.lock().expect("mutex lock") = Some(err);
+            let mut wgpu_error = handler_wgpu_error.lock().expect("mutex lock");
+            match wgpu_error.take() {
+                Some(old_err) => panic!("unhandled error:\nold error: {old_err}\nnew error: {err}"),
+                None => *wgpu_error = Some(err),
+            }
         }));
 
         let size = window.inner_size();
@@ -246,7 +264,7 @@ impl<'a> ShaderPlayground<'a> {
             push_constant_ranges: &[],
         });
 
-        Ok(ShaderPlayground {
+        let mut playground = ShaderPlayground {
             shader_path: shader_path.as_ref().to_owned(),
             device,
             queue,
@@ -261,7 +279,9 @@ impl<'a> ShaderPlayground<'a> {
             pipeline_layout,
             render_pipeline: None,
             start_time: time::Instant::now(),
-        })
+        };
+        playground.update_render_pipeline()?;
+        Ok(playground)
     }
 
     pub fn set_mouse_coords(&mut self, x: f32, y: f32) {
@@ -278,15 +298,17 @@ impl<'a> ShaderPlayground<'a> {
         ];
     }
 
-    pub fn update_render_pipeline(&mut self) {
-        let render_pipeline = match self.create_user_render_pipeline() {
-            Ok(render_pipeline) => render_pipeline,
-            Err(err) => {
-                eprintln!("failed to render user shader: {err}");
-                self.create_default_render_pipeline()
-            }
-        };
-        self.render_pipeline = Some(render_pipeline);
+    pub fn update_render_pipeline(&mut self) -> Result<(), Error> {
+        self.create_user_render_pipeline()
+            .and_then(|pipeline| {
+                self.render_pipeline = Some(pipeline);
+                self.render()
+            })
+            .or_else(|err| {
+                eprintln!("failed to set user render pipeline: {}", err);
+                self.render_pipeline = Some(self.create_default_render_pipeline());
+                self.render()
+            })
     }
 
     fn create_default_render_pipeline(&self) -> wgpu::RenderPipeline {
@@ -299,6 +321,21 @@ impl<'a> ShaderPlayground<'a> {
     fn create_user_render_pipeline(&self) -> Result<wgpu::RenderPipeline, Error> {
         let shader_module = self.read_user_shader()?;
         Ok(self.create_render_pipeline(shader_module))
+    }
+
+    fn read_user_shader(&self) -> Result<wgpu::ShaderModule, Error> {
+        let shader_code = fs::read_to_string(&self.shader_path)?;
+        let shader_module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(&shader_code)),
+            });
+
+        match self.wgpu_error.lock().expect("mutex lock").take() {
+            Some(err) => Err(err.into()),
+            None => Ok(shader_module),
+        }
     }
 
     fn create_render_pipeline(&self, shader_module: wgpu::ShaderModule) -> wgpu::RenderPipeline {
@@ -365,21 +402,7 @@ impl<'a> ShaderPlayground<'a> {
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+
         Ok(())
-    }
-
-    fn read_user_shader(&self) -> Result<wgpu::ShaderModule, Error> {
-        let shader_code = fs::read_to_string(&self.shader_path)?;
-        let shader_module = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: None,
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(&shader_code)),
-            });
-
-        match self.wgpu_error.lock().expect("mutex lock").take() {
-            Some(err) => Err(Error::Wgpu(err)),
-            None => Ok(shader_module),
-        }
     }
 }
