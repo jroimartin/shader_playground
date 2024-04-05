@@ -19,13 +19,15 @@ use std::{
     borrow::Cow,
     fmt, fs, io, mem,
     path::{Path, PathBuf},
-    slice,
+    result, slice,
     sync::{Arc, Mutex},
     time,
 };
 
 use wgpu::{include_wgsl, util::DeviceExt};
 use winit::{dpi::PhysicalSize, window::Window};
+
+type Result<T> = result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
@@ -169,7 +171,7 @@ impl<'a> ShaderPlayground<'a> {
         },
     ];
 
-    pub async fn new<P: AsRef<Path>>(window: &'a Window, shader_path: P) -> Result<Self, Error> {
+    pub async fn new<P: AsRef<Path>>(window: &'a Window, shader_path: P) -> Result<Self> {
         let instance = wgpu::Instance::default();
 
         let surface = instance.create_surface(window)?;
@@ -298,17 +300,15 @@ impl<'a> ShaderPlayground<'a> {
         ];
     }
 
-    pub fn update_render_pipeline(&mut self) -> Result<(), Error> {
-        self.create_user_render_pipeline()
-            .and_then(|pipeline| {
-                self.render_pipeline = Some(pipeline);
-                self.render()
-            })
-            .or_else(|err| {
+    pub fn update_render_pipeline(&mut self) -> Result<()> {
+        let render_pipeline = self
+            .create_user_render_pipeline()
+            .or_else(|err| -> Result<_> {
                 eprintln!("failed to set user render pipeline: {}", err);
-                self.render_pipeline = Some(self.create_default_render_pipeline());
-                self.render()
-            })
+                Ok(self.create_default_render_pipeline())
+            })?;
+        self.render_pipeline = Some(render_pipeline);
+        self.render()
     }
 
     fn create_default_render_pipeline(&self) -> wgpu::RenderPipeline {
@@ -318,12 +318,12 @@ impl<'a> ShaderPlayground<'a> {
         self.create_render_pipeline(shader_module)
     }
 
-    fn create_user_render_pipeline(&self) -> Result<wgpu::RenderPipeline, Error> {
+    fn create_user_render_pipeline(&self) -> Result<wgpu::RenderPipeline> {
         let shader_module = self.read_user_shader()?;
         Ok(self.create_render_pipeline(shader_module))
     }
 
-    fn read_user_shader(&self) -> Result<wgpu::ShaderModule, Error> {
+    fn read_user_shader(&self) -> Result<wgpu::ShaderModule> {
         let shader_code = fs::read_to_string(&self.shader_path)?;
         let shader_module = self
             .device
@@ -331,11 +331,7 @@ impl<'a> ShaderPlayground<'a> {
                 label: None,
                 source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(&shader_code)),
             });
-
-        match self.wgpu_error.lock().expect("mutex lock").take() {
-            Some(err) => Err(err.into()),
-            None => Ok(shader_module),
-        }
+        self.ok_or_wgpu_error(shader_module)
     }
 
     fn create_render_pipeline(&self, shader_module: wgpu::ShaderModule) -> wgpu::RenderPipeline {
@@ -360,7 +356,7 @@ impl<'a> ShaderPlayground<'a> {
             })
     }
 
-    pub fn render(&mut self) -> Result<(), Error> {
+    pub fn render(&mut self) -> Result<()> {
         let render_pipeline = self
             .render_pipeline
             .as_ref()
@@ -379,7 +375,8 @@ impl<'a> ShaderPlayground<'a> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
+
+        self.ok_or_wgpu_error({
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -399,10 +396,18 @@ impl<'a> ShaderPlayground<'a> {
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             rpass.set_bind_group(0, &self.uniforms_bind_group, &[]);
             rpass.draw(0..Self::VERTICES.len() as u32, 0..1);
-        }
+        })?;
+
         self.queue.submit(Some(encoder.finish()));
         frame.present();
 
         Ok(())
+    }
+
+    fn ok_or_wgpu_error<T>(&self, val: T) -> Result<T> {
+        match self.wgpu_error.lock().expect("mutex lock").take() {
+            Some(err) => Err(err.into()),
+            None => Ok(val),
+        }
     }
 }
