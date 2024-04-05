@@ -301,17 +301,15 @@ impl<'a> ShaderPlayground<'a> {
     }
 
     pub fn update_render_pipeline(&mut self) -> Result<()> {
-        let render_pipeline = self
-            .create_user_render_pipeline()
-            .or_else(|err| -> Result<_> {
-                eprintln!("failed to set user render pipeline: {}", err);
-                Ok(self.create_default_render_pipeline())
-            })?;
+        let render_pipeline = self.create_user_render_pipeline().or_else(|err| {
+            eprintln!("failed to set user render pipeline: {}", err);
+            self.create_default_render_pipeline()
+        })?;
         self.render_pipeline = Some(render_pipeline);
         self.render()
     }
 
-    fn create_default_render_pipeline(&self) -> wgpu::RenderPipeline {
+    fn create_default_render_pipeline(&self) -> Result<wgpu::RenderPipeline> {
         let shader_module = self
             .device
             .create_shader_module(include_wgsl!("default.wgsl"));
@@ -320,7 +318,7 @@ impl<'a> ShaderPlayground<'a> {
 
     fn create_user_render_pipeline(&self) -> Result<wgpu::RenderPipeline> {
         let shader_module = self.read_user_shader()?;
-        Ok(self.create_render_pipeline(shader_module))
+        self.create_render_pipeline(shader_module)
     }
 
     fn read_user_shader(&self) -> Result<wgpu::ShaderModule> {
@@ -334,8 +332,12 @@ impl<'a> ShaderPlayground<'a> {
         self.ok_or_wgpu_error(shader_module)
     }
 
-    fn create_render_pipeline(&self, shader_module: wgpu::ShaderModule) -> wgpu::RenderPipeline {
-        self.device
+    fn create_render_pipeline(
+        &self,
+        shader_module: wgpu::ShaderModule,
+    ) -> Result<wgpu::RenderPipeline> {
+        let render_pipeline = self
+            .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: None,
                 layout: Some(&self.pipeline_layout),
@@ -353,7 +355,8 @@ impl<'a> ShaderPlayground<'a> {
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
-            })
+            });
+        self.ok_or_wgpu_error(render_pipeline)
     }
 
     pub fn render(&mut self) -> Result<()> {
