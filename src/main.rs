@@ -15,8 +15,10 @@ use winit::{
 
 async fn run<P: AsRef<Path>>(shader_path: P) {
     let event_loop = EventLoop::new().expect("could not create even loop");
-    let builder = WindowBuilder::new();
-    let window = builder.build(&event_loop).expect("could not create window");
+    let window = WindowBuilder::new()
+        .with_title("Shader Playground")
+        .build(&event_loop)
+        .expect("could not create window");
 
     let mut playground = ShaderPlayground::new(&window, shader_path)
         .await
