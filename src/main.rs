@@ -1,4 +1,9 @@
-use std::{env, path::Path, process};
+use std::{
+    env,
+    path::Path,
+    process, thread,
+    time::{Duration, Instant},
+};
 
 use shader_playground::ShaderPlayground;
 use winit::{
@@ -19,34 +24,51 @@ async fn run<P: AsRef<Path>>(shader_path: P) {
 
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
-        .run(|event, elwt| match event {
-            Event::WindowEvent {
-                window_id: _,
-                event,
-            } => match event {
-                WindowEvent::KeyboardInput {
-                    event:
-                        KeyEvent {
-                            logical_key: Key::Character(s),
-                            ..
-                        },
-                    ..
-                } if s == "r" => playground
-                    .update_render_pipeline()
-                    .expect("could not update render pipeline"),
-                WindowEvent::CursorMoved { position, .. } => {
-                    playground.set_mouse_coords(position.x as f32, position.y as f32);
-                    window.request_redraw();
-                }
-                WindowEvent::Resized(new_size) => playground.resize(new_size),
-                WindowEvent::RedrawRequested => {
-                    playground.render().expect("could not render frame")
-                }
-                WindowEvent::CloseRequested => elwt.exit(),
+        .run(|event, elwt| {
+            let ti = Instant::now();
+            match event {
+                Event::WindowEvent {
+                    window_id: _,
+                    event,
+                } => match event {
+                    WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                logical_key: Key::Character(s),
+                                ..
+                            },
+                        ..
+                    } if s == "r" => playground
+                        .update_render_pipeline()
+                        .expect("could not update render pipeline"),
+                    WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                logical_key: Key::Character(s),
+                                ..
+                            },
+                        ..
+                    } if s == "t" => {
+                        playground.set_start_time(Instant::now());
+                        window.request_redraw();
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        playground.set_mouse_coords(position.x as f32, position.y as f32);
+                        window.request_redraw();
+                    }
+                    WindowEvent::Resized(new_size) => playground.resize(new_size),
+                    WindowEvent::RedrawRequested => {
+                        playground.render().expect("could not render frame");
+                        thread::sleep(
+                            Duration::from_secs_f64(1. / 60.).saturating_sub(ti.elapsed()),
+                        );
+                    }
+                    WindowEvent::CloseRequested => elwt.exit(),
+                    _ => {}
+                },
+                Event::AboutToWait => window.request_redraw(),
                 _ => {}
-            },
-            Event::AboutToWait => window.request_redraw(),
-            _ => {}
+            }
         })
         .unwrap();
 }

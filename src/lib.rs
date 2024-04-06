@@ -21,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
     result, slice,
     sync::{Arc, Mutex},
-    time,
+    time::Instant,
 };
 
 use wgpu::{include_wgsl, util::DeviceExt};
@@ -140,7 +140,7 @@ pub struct ShaderPlayground<'a> {
     uniforms_bind_group: wgpu::BindGroup,
     pipeline_layout: wgpu::PipelineLayout,
     render_pipeline: Option<wgpu::RenderPipeline>,
-    start_time: time::Instant,
+    start_time: Instant,
 }
 
 impl<'a> ShaderPlayground<'a> {
@@ -280,7 +280,7 @@ impl<'a> ShaderPlayground<'a> {
             uniforms_bind_group,
             pipeline_layout,
             render_pipeline: None,
-            start_time: time::Instant::now(),
+            start_time: Instant::now(),
         };
         playground.update_render_pipeline()?;
         Ok(playground)
@@ -288,6 +288,10 @@ impl<'a> ShaderPlayground<'a> {
 
     pub fn set_mouse_coords(&mut self, x: f32, y: f32) {
         self.uniforms.mouse_coords = [x, y];
+    }
+
+    pub fn set_start_time(&mut self, t: Instant) {
+        self.start_time = t;
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
