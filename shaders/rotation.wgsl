@@ -34,8 +34,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sin_theta = sin(ROTATION_SPEED * t);
     let cos_theta = cos(ROTATION_SPEED * t);
     let rotation = mat2x2<f32>(cos_theta, -sin_theta, sin_theta, cos_theta);
-    let offset = vec2<f32>(0.5, 0.5);
-    let uvr = (uv - offset) * rotation + offset;
+    let rot_point = vec2<f32>(0.5, 0.5);
+    let uvr = (uv - rot_point) * rotation + rot_point;
 
     var color = vec4<f32>(1.);
     if (uvr.x > 0.3 && uvr.x < 0.7 && uvr.y > 0.3 && uvr.y < 0.7) {
