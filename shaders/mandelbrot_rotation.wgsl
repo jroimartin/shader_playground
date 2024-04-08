@@ -34,22 +34,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let scale = 25./(10. + exp(10*abs(sin(t*0.2))));
 
     let rot_speed = 1/exp(scale/(25./10. + exp(10.))*100.);
-    let sin_theta = sin(rot_speed*t);
-    let cos_theta = cos(rot_speed*t);
-    let rotation = mat2x2<f32>(cos_theta, -sin_theta, sin_theta, cos_theta);
-    let rot_point = vec2<f32>(0.5, 0.5);
-    let uvr = (uv - rot_point)*rotation + rot_point;
+    let rot_p = vec2<f32>(0.5, 0.5);
+    let uvr = rot(uv, rot_speed*t, rot_p);
 
     let offset = vec2<f32>(-2.5 + 20./(17.2 + exp(scale)), -scale/2.);
-    var uv0 = uvr*scale + offset;
+    let uv0 = uvr*scale + offset;
+    let color = mandelbrot(uv0);
+    return vec4<f32>(abs(sin(t*color)), 0., 0., 1.0);
+}
+
+fn rot(uv: vec2<f32>, a: f32, p: vec2<f32>) -> vec2<f32> {
+    let sin_a = sin(a);
+    let cos_a = cos(a);
+    let mat = mat2x2<f32>(cos_a, -sin_a, sin_a, cos_a);
+    return (uv - p)*mat + p;
+}
+
+fn mandelbrot(uv0: vec2<f32>) -> f32 {
     var x = 0.0;
     var y = 0.0;
     var i = 0;
-    for (; x*x + y*y <= 2*2 && i < MAX_ITERATIONS; i++) {
+    for (; x*x + y*y <= 4 && i < MAX_ITERATIONS; i++) {
         let xtemp = x*x - y*y + uv0.x;
         y = 2*x*y + uv0.y;
         x = xtemp;
     }
-    let color = f32(i)/f32(MAX_ITERATIONS);
-    return vec4<f32>(abs(sin(t*color)), 0., 0., 1.0);
+    return f32(i)/f32(MAX_ITERATIONS);
 }
