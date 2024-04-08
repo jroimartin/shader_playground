@@ -33,15 +33,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let scale = 25./(10. + exp(10*abs(sin(t*0.2))));
     let offset = vec2<f32>(-2.5 + 20./(17.2 + exp(scale)), -scale/2.);
-    var uv0 = uv*scale + offset;
+    let uv0 = uv*scale + offset;
+    let color = mandelbrot(uv0);
+    return vec4<f32>(vec3<f32>(color), 1.0);
+}
+
+fn mandelbrot(uv0: vec2<f32>) -> f32 {
     var x = 0.0;
     var y = 0.0;
     var i = 0;
-    for (; x*x + y*y <= 2*2 && i < MAX_ITERATIONS; i++) {
+    for (; x*x + y*y <= 4 && i < MAX_ITERATIONS; i++) {
         let xtemp = x*x - y*y + uv0.x;
         y = 2*x*y + uv0.y;
         x = xtemp;
     }
-    let color = f32(i)/f32(MAX_ITERATIONS);
-    return vec4<f32>(vec3<f32>(color), 1.0);
+    return f32(i)/f32(MAX_ITERATIONS);
 }
