@@ -1,10 +1,10 @@
 use std::{
-    env,
     path::Path,
-    process, thread,
+    thread,
     time::{Duration, Instant},
 };
 
+use clap::Parser;
 use shader_playground::ShaderPlayground;
 use winit::{
     event::{Event, KeyEvent, WindowEvent},
@@ -75,15 +75,15 @@ async fn run<P: AsRef<Path>>(shader_path: P) {
         .unwrap();
 }
 
+#[derive(Parser)]
+struct Args {
+    /// Path of the shader file.
+    shader_path: String,
+}
+
 fn main() {
     env_logger::init();
 
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
-        eprintln!("usage: shader_playground shader_file");
-        process::exit(2);
-    }
-    let shader_path = &args[1];
-
-    pollster::block_on(run(shader_path));
+    let args = Args::parse();
+    pollster::block_on(run(args.shader_path));
 }
