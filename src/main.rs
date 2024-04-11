@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
@@ -13,14 +13,18 @@ use winit::{
     window::WindowBuilder,
 };
 
-async fn run<P: AsRef<Path>>(shader_path: P) {
+async fn run<P, T>(shader: P, textures: T)
+where
+    P: AsRef<Path>,
+    T: IntoIterator<Item = P>,
+{
     let event_loop = EventLoop::new().expect("could not create even loop");
     let window = WindowBuilder::new()
         .with_title("Shader Playground")
         .build(&event_loop)
         .expect("could not create window");
 
-    let mut playground = ShaderPlayground::new(&window, shader_path)
+    let mut playground = ShaderPlayground::new(&window, shader, textures)
         .await
         .expect("could not create shader playground");
 
@@ -78,12 +82,16 @@ async fn run<P: AsRef<Path>>(shader_path: P) {
 #[derive(Parser)]
 struct Args {
     /// Path of the shader file.
-    shader_path: String,
+    shader: PathBuf,
+
+    /// Path of the texture shared with the shader.
+    #[arg(id = "texture", short, long)]
+    textures: Vec<PathBuf>,
 }
 
 fn main() {
     env_logger::init();
 
     let args = Args::parse();
-    pollster::block_on(run(args.shader_path));
+    pollster::block_on(run(&args.shader, &args.textures));
 }

@@ -40,6 +40,7 @@ pub enum Error {
     RequestDevice(wgpu::RequestDeviceError),
     Surface(wgpu::SurfaceError),
     Io(io::Error),
+    Image(image::ImageError),
 }
 
 impl fmt::Display for Error {
@@ -54,6 +55,7 @@ impl fmt::Display for Error {
             Self::RequestDevice(err) => write!(f, "request device error: {err}"),
             Self::Surface(err) => write!(f, "surface error: {err}"),
             Self::Io(err) => write!(f, "i/o error: {err}"),
+            Self::Image(err) => write!(f, "image error: {err}"),
         }
     }
 }
@@ -85,6 +87,12 @@ impl From<wgpu::SurfaceError> for Error {
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+impl From<image::ImageError> for Error {
+    fn from(err: image::ImageError) -> Self {
+        Self::Image(err)
     }
 }
 
@@ -127,7 +135,7 @@ impl Uniforms {
 }
 
 pub struct ShaderPlayground<'a> {
-    shader_path: PathBuf,
+    shader: PathBuf,
     device: wgpu::Device,
     queue: wgpu::Queue,
     wgpu_error: Arc<Mutex<Option<wgpu::Error>>>,
@@ -139,6 +147,7 @@ pub struct ShaderPlayground<'a> {
     uniforms_buffer: wgpu::Buffer,
     uniforms_bind_group: wgpu::BindGroup,
     pipeline_layout: wgpu::PipelineLayout,
+    texture_bind_groups: Vec<wgpu::BindGroup>,
     render_pipeline: Option<wgpu::RenderPipeline>,
     start_time: Instant,
 }
@@ -171,7 +180,11 @@ impl<'a> ShaderPlayground<'a> {
         },
     ];
 
-    pub async fn new<P: AsRef<Path>>(window: &'a Window, shader_path: P) -> Result<Self> {
+    pub async fn new<P, T>(window: &'a Window, shader: P, textures: T) -> Result<Self>
+    where
+        P: AsRef<Path>,
+        T: IntoIterator<Item = P>,
+    {
         let instance = wgpu::Instance::default();
 
         let surface = instance.create_surface(window)?;
@@ -260,14 +273,101 @@ impl<'a> ShaderPlayground<'a> {
             }],
         });
 
+        let mut bind_group_layouts = vec![uniforms_bind_group_layout];
+
+        let mut texture_bind_groups = Vec::new();
+        for texture_path in textures {
+            let img_bytes = fs::read(texture_path.as_ref())?;
+            let img = image::load_from_memory(&img_bytes)?.to_rgba8();
+            let img_size = img.dimensions();
+            let texture_size = wgpu::Extent3d {
+                width: img_size.0,
+                height: img_size.1,
+                depth_or_array_layers: 1,
+            };
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: texture_size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &img,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * img_size.0),
+                    rows_per_image: Some(img_size.1),
+                },
+                texture_size,
+            );
+            let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                address_mode_w: wgpu::AddressMode::Repeat,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
+            let texture_bind_group_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+            let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &texture_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&texture_sampler),
+                    },
+                ],
+            });
+            bind_group_layouts.push(texture_bind_group_layout);
+            texture_bind_groups.push(texture_bind_group);
+        }
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&uniforms_bind_group_layout],
+            bind_group_layouts: &bind_group_layouts.iter().collect::<Vec<_>>(),
             push_constant_ranges: &[],
         });
 
         let mut playground = ShaderPlayground {
-            shader_path: shader_path.as_ref().to_owned(),
+            shader: shader.as_ref().to_owned(),
             device,
             queue,
             wgpu_error,
@@ -279,6 +379,7 @@ impl<'a> ShaderPlayground<'a> {
             uniforms_buffer,
             uniforms_bind_group,
             pipeline_layout,
+            texture_bind_groups,
             render_pipeline: None,
             start_time: Instant::now(),
         };
@@ -326,7 +427,7 @@ impl<'a> ShaderPlayground<'a> {
     }
 
     fn read_user_shader(&self) -> Result<wgpu::ShaderModule> {
-        let shader_code = fs::read_to_string(&self.shader_path)?;
+        let shader_code = fs::read_to_string(&self.shader)?;
         let shader_module = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -402,6 +503,9 @@ impl<'a> ShaderPlayground<'a> {
             rpass.set_pipeline(render_pipeline);
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             rpass.set_bind_group(0, &self.uniforms_bind_group, &[]);
+            for (i, bind_group) in self.texture_bind_groups.iter().enumerate() {
+                rpass.set_bind_group((i + 1) as u32, bind_group, &[]);
+            }
             rpass.draw(0..Self::VERTICES.len() as u32, 0..1);
         })?;
 
