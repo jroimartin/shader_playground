@@ -1,3 +1,6 @@
+// Run with:
+//   cargo run -- -t /path/to/texture.png shaders/texture.wgsl
+
 struct Uniforms {
     mouse: vec2<f32>,
     size: vec2<f32>,
