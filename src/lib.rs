@@ -111,12 +111,25 @@ impl Vertex {
         unsafe { slice::from_raw_parts(self as *const Self as *const u8, mem::size_of::<Self>()) }
     }
 
-    fn vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
+    fn buffer_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: mem::size_of::<Self>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::VERTEX_ATTR_ARRAY,
         }
+    }
+
+    fn create_buffer(vertices: &[Self], device: &wgpu::Device) -> wgpu::Buffer {
+        let contents: Vec<u8> = vertices
+            .iter()
+            .flat_map(|v| v.as_bytes())
+            .copied()
+            .collect();
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: &contents,
+            usage: wgpu::BufferUsages::VERTEX,
+        })
     }
 }
 
@@ -134,14 +147,158 @@ impl Uniforms {
     }
 }
 
+struct UniformsBinding {
+    buffer: wgpu::Buffer,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+}
+
+impl UniformsBinding {
+    fn create(device: &wgpu::Device) -> Self {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+
+        Self {
+            buffer,
+            bind_group_layout,
+            bind_group,
+        }
+    }
+}
+
+struct TextureBinding {
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+}
+
+impl TextureBinding {
+    fn create<P>(path: P, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self>
+    where
+        P: AsRef<Path>,
+    {
+        let img_bytes = fs::read(path.as_ref())?;
+        let img = image::load_from_memory(&img_bytes)?.to_rgba8();
+        let img_size = img.dimensions();
+
+        let tex_size = wgpu::Extent3d {
+            width: img_size.0,
+            height: img_size.1,
+            depth_or_array_layers: 1,
+        };
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: tex_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * img_size.0),
+                rows_per_image: Some(img_size.1),
+            },
+            tex_size,
+        );
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        Ok(Self {
+            bind_group_layout,
+            bind_group,
+        })
+    }
+}
+
 pub struct ShaderPlayground<'a> {
     shader: PathBuf,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    wgpu_error: Arc<Mutex<Option<wgpu::Error>>>,
     surface: wgpu::Surface<'a>,
     surface_config: wgpu::SurfaceConfiguration,
-    texture_format: wgpu::TextureFormat,
+    color_target_state: wgpu::ColorTargetState,
     vertex_buffer: wgpu::Buffer,
     uniforms: Uniforms,
     uniforms_buffer: wgpu::Buffer,
@@ -150,6 +307,7 @@ pub struct ShaderPlayground<'a> {
     texture_bind_groups: Vec<wgpu::BindGroup>,
     render_pipeline: Option<wgpu::RenderPipeline>,
     start_time: Instant,
+    wgpu_error: Arc<Mutex<Option<wgpu::Error>>>,
 }
 
 impl<'a> ShaderPlayground<'a> {
@@ -188,6 +346,7 @@ impl<'a> ShaderPlayground<'a> {
         let instance = wgpu::Instance::default();
 
         let surface = instance.create_surface(window)?;
+
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
@@ -210,14 +369,7 @@ impl<'a> ShaderPlayground<'a> {
             .await?;
 
         let wgpu_error = Arc::new(Mutex::new(None));
-        let handler_wgpu_error = Arc::clone(&wgpu_error);
-        device.on_uncaptured_error(Box::new(move |err| {
-            let mut wgpu_error = handler_wgpu_error.lock().expect("mutex lock");
-            match wgpu_error.take() {
-                Some(old_err) => panic!("unhandled error:\nold error: {old_err}\nnew error: {err}"),
-                None => *wgpu_error = Some(err),
-            }
-        }));
+        device.on_uncaptured_error(Box::new(wgpu_error_handler(Arc::clone(&wgpu_error))));
 
         let size = window.inner_size();
         let surface_config = surface
@@ -227,137 +379,24 @@ impl<'a> ShaderPlayground<'a> {
 
         // The first texture format in the `formats` vector is
         // preferred.
-        let texture_format = *surface
-            .get_capabilities(&adapter)
-            .formats
-            .first()
-            .ok_or(Error::GetTextureFormat)?;
+        let color_target_state = wgpu::ColorTargetState::from(
+            *surface
+                .get_capabilities(&adapter)
+                .formats
+                .first()
+                .ok_or(Error::GetTextureFormat)?,
+        );
 
-        let vertex_buffer_contents: Vec<u8> = Self::VERTICES
-            .iter()
-            .flat_map(|v| v.as_bytes())
-            .copied()
-            .collect();
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: &vertex_buffer_contents,
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let vertex_buffer = Vertex::create_buffer(&Self::VERTICES, &device);
 
-        let uniforms_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let uniforms_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: None,
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let uniforms_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &uniforms_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms_buffer.as_entire_binding(),
-            }],
-        });
+        let uniforms_binding = UniformsBinding::create(&device);
 
-        let mut bind_group_layouts = vec![uniforms_bind_group_layout];
-
+        let mut bind_group_layouts = vec![uniforms_binding.bind_group_layout];
         let mut texture_bind_groups = Vec::new();
-        for texture_path in textures {
-            let img_bytes = fs::read(texture_path.as_ref())?;
-            let img = image::load_from_memory(&img_bytes)?.to_rgba8();
-            let img_size = img.dimensions();
-            let texture_size = wgpu::Extent3d {
-                width: img_size.0,
-                height: img_size.1,
-                depth_or_array_layers: 1,
-            };
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: None,
-                size: texture_size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &img,
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * img_size.0),
-                    rows_per_image: Some(img_size.1),
-                },
-                texture_size,
-            );
-            let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                address_mode_u: wgpu::AddressMode::Repeat,
-                address_mode_v: wgpu::AddressMode::Repeat,
-                address_mode_w: wgpu::AddressMode::Repeat,
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Nearest,
-                mipmap_filter: wgpu::FilterMode::Nearest,
-                ..Default::default()
-            });
-            let texture_bind_group_layout =
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: None,
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                    ],
-                });
-            let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&texture_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&texture_sampler),
-                    },
-                ],
-            });
-            bind_group_layouts.push(texture_bind_group_layout);
-            texture_bind_groups.push(texture_bind_group);
+        for tex_path in textures {
+            let tex_binding = TextureBinding::create(tex_path, &device, &queue)?;
+            bind_group_layouts.push(tex_binding.bind_group_layout);
+            texture_bind_groups.push(tex_binding.bind_group);
         }
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -370,19 +409,20 @@ impl<'a> ShaderPlayground<'a> {
             shader: shader.as_ref().to_owned(),
             device,
             queue,
-            wgpu_error,
             surface,
             surface_config,
-            texture_format,
+            color_target_state,
             vertex_buffer,
             uniforms: Uniforms::default(),
-            uniforms_buffer,
-            uniforms_bind_group,
+            uniforms_buffer: uniforms_binding.buffer,
+            uniforms_bind_group: uniforms_binding.bind_group,
             pipeline_layout,
             texture_bind_groups,
             render_pipeline: None,
             start_time: Instant::now(),
+            wgpu_error,
         };
+
         playground.update_render_pipeline()?;
         Ok(playground)
     }
@@ -449,12 +489,12 @@ impl<'a> ShaderPlayground<'a> {
                 vertex: wgpu::VertexState {
                     module: &shader_module,
                     entry_point: "vs_main",
-                    buffers: &[Vertex::vertex_buffer_layout()],
+                    buffers: &[Vertex::buffer_layout()],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader_module,
                     entry_point: "fs_main",
-                    targets: &[Some(self.texture_format.into())],
+                    targets: &[Some(self.color_target_state.clone())],
                 }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
@@ -519,6 +559,16 @@ impl<'a> ShaderPlayground<'a> {
         match self.wgpu_error.lock().expect("mutex lock").take() {
             Some(err) => Err(err.into()),
             None => Ok(val),
+        }
+    }
+}
+
+fn wgpu_error_handler(wgpu_error: Arc<Mutex<Option<wgpu::Error>>>) -> impl Fn(wgpu::Error) {
+    move |err| {
+        let mut error = wgpu_error.lock().expect("mutex lock");
+        match error.take() {
+            Some(old_err) => panic!("unhandled error:\nold error: {old_err}\nnew error: {err}"),
+            None => *error = Some(err),
         }
     }
 }
